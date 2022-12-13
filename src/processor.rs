@@ -431,3 +431,254 @@ pub fn initialize_mint_account(program_id: &Pubkey, accounts: &[AccountInfo]) ->
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use solana_program::{
+        instruction::{AccountMeta, Instruction},
+        system_program::ID as SYSTEM_PROGRAM_ID,
+    };
+    use spl_associated_token_account::{
+        get_associated_token_address, instruction::create_associated_token_account,
+    };
+    use spl_token::ID as TOKEN_PROGRAM_ID;
+    use {
+        assert_matches::*,
+        solana_program_test::*,
+        solana_sdk::{
+            signature::Signer, sysvar::rent::ID as SYSVAR_RENT_ID, transaction::Transaction,
+        },
+    };
+
+    fn create_initialize_mint_ix(
+        initializer: Pubkey,
+        program_id: Pubkey,
+    ) -> (Pubkey, Pubkey, Instruction) {
+        let (mint, _mint_bump) = Pubkey::find_program_address(&[b"token_mint"], &program_id);
+        let (mint_auth, _mint_auth_bump) =
+            Pubkey::find_program_address(&[b"token_auth"], &program_id);
+        let ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(initializer, true),
+                AccountMeta::new(mint, false),
+                AccountMeta::new(mint_auth, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+                AccountMeta::new_readonly(SYSVAR_RENT_ID, false),
+            ],
+            data: vec![3],
+        };
+        (mint, mint_auth, ix)
+    }
+    fn create_add_intro_ix(
+        payer: Pubkey,
+        program_id: Pubkey,
+        name: String,
+        msg: String,
+    ) -> Instruction {
+        let (mint, _mint_bump) = Pubkey::find_program_address(&[b"token_mint"], &program_id);
+        let (mint_auth, _mint_auth_bump) =
+            Pubkey::find_program_address(&[b"token_auth"], &program_id);
+        let (intro_pda, _intro_bump) =
+            Pubkey::find_program_address(&[payer.as_ref(), name.as_ref()], &program_id);
+        let (counter_pda, _counter_bump) =
+            Pubkey::find_program_address(&[intro_pda.as_ref(), b"reply"], &program_id);
+        let ata = get_associated_token_address(&payer, &mint);
+        let mut data = vec![0];
+        data.append(
+            &mut (TryInto::<u32>::try_into(name.len()).unwrap().to_le_bytes())
+                .try_into()
+                .unwrap(),
+        );
+        data.append(&mut name.into_bytes());
+        data.append(
+            &mut (TryInto::<u32>::try_into(msg.len()).unwrap().to_le_bytes())
+                .try_into()
+                .unwrap(),
+        );
+        data.append(&mut msg.into_bytes());
+        let accounts = vec![
+            AccountMeta::new_readonly(payer, true),
+            AccountMeta::new(intro_pda, false),
+            AccountMeta::new(counter_pda, false),
+            AccountMeta::new(mint, false),
+            AccountMeta::new_readonly(mint_auth, false),
+            AccountMeta::new(ata, false),
+            AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+            AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+        ];
+        Instruction {
+            program_id,
+            accounts,
+            data,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_init_mint_acc_ix() {
+        let program_id = Pubkey::new_unique();
+        let (mut banks_client, payer, recent_blockhash) = ProgramTest::new(
+            "student intro program",
+            program_id,
+            processor!(process_instruction),
+        )
+        .start()
+        .await;
+
+        let (_mint, _mint_auth, ix) = create_initialize_mint_ix(payer.pubkey(), program_id);
+        let mut tx = Transaction::new_with_payer(&[ix], Some(&payer.pubkey()));
+        tx.sign(&[&payer], recent_blockhash);
+        assert_matches!(banks_client.process_transaction(tx).await, Ok(_));
+    }
+
+    #[tokio::test]
+    async fn test_add_student_intro_ix() {
+        let program_id = Pubkey::new_unique();
+        let (mut banks_client, payer, recent_blockhash) = ProgramTest::new(
+            "student intro program",
+            program_id,
+            processor!(process_instruction),
+        )
+        .start()
+        .await;
+        let name = "Naruto".to_owned();
+        let msg = "Developing solana jutsu".to_owned();
+        let (mint, _mint_auth, init_mint_ix) =
+            create_initialize_mint_ix(payer.pubkey(), program_id);
+        let create_ata_ix = create_associated_token_account(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            &mint,
+            &TOKEN_PROGRAM_ID,
+        );
+        let add_intro_ix = create_add_intro_ix(payer.pubkey(), program_id, name, msg);
+        let mut tx = Transaction::new_with_payer(
+            &[init_mint_ix, create_ata_ix, add_intro_ix],
+            Some(&payer.pubkey()),
+        );
+        tx.sign(&[&payer], recent_blockhash);
+        assert_matches!(banks_client.process_transaction(tx).await, Ok(_));
+    }
+
+    #[tokio::test]
+    async fn test_update_student_intro_ix() {
+        let program_id = Pubkey::new_unique();
+        let (mut banks_client, payer, recent_blockhash) = ProgramTest::new(
+            "student intro program",
+            program_id,
+            processor!(process_instruction),
+        )
+        .start()
+        .await;
+        let name = "Naruto".to_owned();
+        let (prev_msg, new_msg) = (
+            "Looking to develop solana jutsu".to_owned(),
+            "Exploring solana ecosystem".to_owned(),
+        );
+        let (mint, _mint_auth, init_mint_ix) =
+            create_initialize_mint_ix(payer.pubkey(), program_id);
+        let create_ata_ix = create_associated_token_account(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            &mint,
+            &TOKEN_PROGRAM_ID,
+        );
+        let add_intro_ix = create_add_intro_ix(payer.pubkey(), program_id, name.clone(), prev_msg);
+        let (intro_pda, _intro_bump) =
+            Pubkey::find_program_address(&[payer.pubkey().as_ref(), name.as_ref()], &program_id);
+        let mut data = vec![1];
+        data.append(
+            &mut (TryInto::<u32>::try_into(name.len()).unwrap().to_le_bytes())
+                .try_into()
+                .unwrap(),
+        );
+        data.append(&mut name.into_bytes());
+        data.append(
+            &mut (TryInto::<u32>::try_into(new_msg.len())
+                .unwrap()
+                .to_le_bytes())
+            .try_into()
+            .unwrap(),
+        );
+        data.append(&mut new_msg.into_bytes());
+        let update_intro_ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(payer.pubkey(), true),
+                AccountMeta::new(intro_pda, false),
+            ],
+            data,
+        };
+        let mut tx = Transaction::new_with_payer(
+            &[init_mint_ix, create_ata_ix, add_intro_ix, update_intro_ix],
+            Some(&payer.pubkey()),
+        );
+        tx.sign(&[&payer], recent_blockhash);
+        assert_matches!(banks_client.process_transaction(tx).await, Ok(_));
+    }
+
+    #[tokio::test]
+    async fn test_add_reply_ix() {
+        let program_id = Pubkey::new_unique();
+        let (mut banks_client, payer, recent_blockhash) = ProgramTest::new(
+            "student intro program",
+            program_id,
+            processor!(process_instruction),
+        )
+        .start()
+        .await;
+        let name = "Naruto".to_owned();
+        let msg = "Looking to develop solana jutsu".to_owned();
+        let reply = "All the best Naruto".to_owned();
+
+        let (mint, mint_auth, init_mint_ix) = create_initialize_mint_ix(payer.pubkey(), program_id);
+        let create_ata_ix = create_associated_token_account(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            &mint,
+            &TOKEN_PROGRAM_ID,
+        );
+        let add_intro_ix = create_add_intro_ix(payer.pubkey(), program_id, name.clone(), msg);
+        let (intro_pda, _intro_bump) =
+            Pubkey::find_program_address(&[payer.pubkey().as_ref(), name.as_ref()], &program_id);
+        let (counter_pda, _counter_bump) =
+            Pubkey::find_program_address(&[intro_pda.as_ref(), b"reply"], &program_id);
+        let (reply_pda, _reply_bump) = Pubkey::find_program_address(
+            &[intro_pda.as_ref(), 0u64.to_be_bytes().as_ref()],
+            &program_id,
+        );
+        let ata = get_associated_token_address(&payer.pubkey(), &mint);
+
+        let mut data = vec![2];
+        data.append(
+            &mut (TryInto::<u32>::try_into(reply.len()).unwrap().to_le_bytes())
+                .try_into()
+                .unwrap(),
+        );
+        data.append(&mut reply.into_bytes());
+        let add_reply_ix = Instruction {
+            program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(payer.pubkey(), true),
+                AccountMeta::new_readonly(intro_pda, false),
+                AccountMeta::new(counter_pda, false),
+                AccountMeta::new(reply_pda, false),
+                AccountMeta::new(mint, false),
+                AccountMeta::new_readonly(mint_auth, false),
+                AccountMeta::new(ata, false),
+                AccountMeta::new_readonly(SYSTEM_PROGRAM_ID, false),
+                AccountMeta::new_readonly(TOKEN_PROGRAM_ID, false),
+            ],
+            data,
+        };
+
+        let mut tx = Transaction::new_with_payer(
+            &[init_mint_ix, create_ata_ix, add_intro_ix, add_reply_ix],
+            Some(&payer.pubkey()),
+        );
+        tx.sign(&[&payer], recent_blockhash);
+        assert_matches!(banks_client.process_transaction(tx).await, Ok(_));
+    }
+}
